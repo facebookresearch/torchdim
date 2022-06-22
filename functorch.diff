@@ -1,0 +1,110 @@
+# Copyright (c) Facebook, Inc. and its affiliates.
+# All rights reserved.
+#
+# This source code is licensed under the BSD-style license found in the
+# LICENSE file in the root directory of this source tree.
+diff --git a/functorch/csrc/DynamicLayer.cpp b/functorch/csrc/DynamicLayer.cpp
+index 42bfece..023e542 100644
+--- a/functorch/csrc/DynamicLayer.cpp
++++ b/functorch/csrc/DynamicLayer.cpp
+@@ -213,11 +213,9 @@ static DynamicLayer popDynamicLayer() {
+
+ static int64_t pushDynamicLayer(DynamicLayer&& dynamic_layer) {
+   auto& dynamicLayerStack = dynamicLayerStackAccessor();
+-  int64_t layerId = 1 + dynamicLayerStack.size();
+-  TORCH_INTERNAL_ASSERT(layerId == dynamic_layer.layerId());
+   dynamicLayerStack.emplace_back(dynamic_layer);
+
+-  if (layerId == 1) {
++  if (dynamicLayerStack.size() == 1) {
+     setDynamicLayerFrontBackKeysIncluded(true);
+ #ifdef HAS_TORCH_SHOW_DISPATCH_TRACE
+     if (c10::show_dispatch_trace_enabled()) {
+@@ -226,7 +224,7 @@ static int64_t pushDynamicLayer(DynamicLayer&& dynamic_layer) {
+ #endif
+   }
+
+-  return layerId;
++  return dynamic_layer.layerId();
+ }
+
+ int64_t initAndPushDynamicLayer(
+@@ -235,12 +233,12 @@ int64_t initAndPushDynamicLayer(
+     optional<RandomnessType> randomness,
+     optional<bool> prev_grad_mode,
+     optional<bool> prev_fwd_grad_mode,
+-    optional<bool> functionalize_add_back_views) {
++    optional<bool> functionalize_add_back_views,
++    optional<int64_t> layer_id) {
+   const auto& dynamicLayerStack = dynamicLayerStackAccessor();
+-  const auto layerId = 1 + dynamicLayerStack.size();
++  const auto layerId = layer_id ? *layer_id : (1 + dynamicLayerStack.size());
+   DynamicLayer new_layer(transform_type, layerId, batch_size, randomness, prev_grad_mode, prev_fwd_grad_mode, functionalize_add_back_views);
+   pushDynamicLayer(std::move(new_layer));
+-
+   auto& data = getGlobalDynmetaData();
+
+   TORCH_INTERNAL_ASSERT(data.find(layerId) == data.end());
+diff --git a/functorch/csrc/DynamicLayer.h b/functorch/csrc/DynamicLayer.h
+index fe91298..381875e 100644
+--- a/functorch/csrc/DynamicLayer.h
++++ b/functorch/csrc/DynamicLayer.h
+@@ -57,7 +57,8 @@ FUNCTORCH_API int64_t initAndPushDynamicLayer(
+     optional<RandomnessType> randomness = nullopt,
+     optional<bool> prev_grad_mode = nullopt,
+     optional<bool> prev_fwd_grad_mode = nullopt,
+-    optional<bool> functionalize_add_back_views = nullopt);
++    optional<bool> functionalize_add_back_views = nullopt,
++    optional<int64_t> layer_id = nullopt);
+ FUNCTORCH_API DynamicLayer popDynamicLayerAndDeleteMetadata();
+ FUNCTORCH_API c10::optional<DynamicLayer> maybeCurrentDynamicLayer();
+ FUNCTORCH_API const std::vector<DynamicLayer>& getDynamicLayerStack();
+diff --git a/functorch/csrc/init.cpp b/functorch/csrc/init.cpp
+index b0699ce..250c0c3 100644
+--- a/functorch/csrc/init.cpp
++++ b/functorch/csrc/init.cpp
+@@ -239,6 +239,18 @@ int64_t _vmap_increment_nesting(int64_t batch_size, const std::string& randomnes
+   return initAndPushDynamicLayer(TransformType::Vmap, batch_size, get_randomness_enum(randomness));
+ }
+
++void _vmap_add_layers(const std::vector<std::pair<int64_t, int64_t>>& levels) {
++  for (const auto l : levels) {
++    initAndPushDynamicLayer(TransformType::Vmap, l.second, RandomnessType::Different, nullopt, nullopt, nullopt, l.first);
++  }
++}
++
++void _vmap_remove_layers(int N) {
++  for (int i = 0; i < N; ++i) {
++    popDynamicLayerAndDeleteMetadata();
++  }
++}
++
+ int64_t _vmap_decrement_nesting() {
+   auto layer = popDynamicLayerAndDeleteMetadata();
+   TORCH_INTERNAL_ASSERT(layer.key() == TransformType::Vmap);
+@@ -358,7 +370,7 @@ static void dump_local_tls() {
+
+
+ namespace at { namespace functorch {
+-
++#if 0
+ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+   m.def("_add_batch_dim", &at::functorch::_add_batch_dim, "add batch dim");
+   m.def("_remove_batch_dim", &at::functorch::_remove_batch_dim, "remove batch dim");
+@@ -367,6 +379,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+   m.def("_propagate_functional_input_mutation", &at::functorch::_propagate_functional_input_mutation, "propagate functional input mutations");
+   m.def("_unwrap_functional_tensor", &at::functorch::_unwrap_functional_tensor, "remove functional tensor");
+   m.def("_vmap_increment_nesting", &at::functorch::_vmap_increment_nesting, "remove batch dim");
++  m.def("_vmap_add_layers", &at::functorch::_vmap_add_layers, "make layer ids active");
++  m.def("_vmap_remove_layers", &at::functorch::_vmap_remove_layers, "remove N active layers");
++
+   m.def("_vmap_decrement_nesting", &at::functorch::_vmap_decrement_nesting, "remove batch dim");
+   m.def("_func_increment_nesting", &at::functorch::_func_increment_nesting, "functionalization start");
+   m.def("_func_decrement_nesting", &at::functorch::_func_decrement_nesting, "functionalization end");
+@@ -409,5 +424,5 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+   initDispatchBindings(m.ptr());
+ #endif
+ }
+-
++#endif
+ }}
