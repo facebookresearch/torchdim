@@ -1752,41 +1752,6 @@ static PyObject* test_c(PyObject *self,
     PY_END(nullptr);
 }
 
-
-template<bool is_pointwise>
-static PyObject* call_torch_function(PyObject *self,
-                      PyObject *const *args,
-                      Py_ssize_t nargs,
-                      PyObject *kwnames) {
-    PY_BEGIN
-    Arena A;
-    maybeInitializeGlobals();
-    return __torch_function__(A, self, py::vector_args(args, nargs, kwnames), is_pointwise).release();
-    PY_END(nullptr)
-}
-
-PyMethodDef wrapper_method =  {"wrapper", (PyCFunction) call_torch_function<false>, METH_FASTCALL | METH_KEYWORDS };
-PyMethodDef wrapper_method_pw =  {"wrapper", (PyCFunction) call_torch_function<true>, METH_FASTCALL | METH_KEYWORDS };
-
-
-static PyObject* _wrap_method(PyObject *self,
-                      PyObject *const *args,
-                      Py_ssize_t nargs,
-                      PyObject *kwnames) {
-    PY_BEGIN
-    AT_ASSERT(nargs == 2);
-    // XXX - ignore python function wrapped, we will call torch function directly
-    py::handle orig = args[0];
-    if (!pointwise.ptr()) {
-        auto dim = py::import("torchdim");
-        pointwise = dim.attr("pointwise");
-    }
-    bool is_pointwise = pointwise.contains(orig);
-    auto r = py::object::checked_steal(PyCFunction_New(is_pointwise ? &wrapper_method_pw : &wrapper_method, orig.ptr()));
-    return PyInstanceMethod_New(r.release());
-    PY_END(nullptr);
-}
-
 static DimEntry _wrap_dim(py::handle d, size_t N, bool keepdim);
 
 static PyObject* order(PyObject *_,
@@ -2854,99 +2819,34 @@ static Slice<DimEntry> _dims(Arena& A, py::handle d, size_t N, bool keepdim) {
 
 struct WrappedOperator : public py::base<WrappedOperator> {
     py::object orig;
+    PyMethodDef method_def;
+    py::object name, doc;
+
+    bool is_pointwise = false;
     int64_t dim_offset = 0;
     int64_t keepdim_offset = 1;
     std::string dim_name;
     bool single_dim = false;
     bool reduce = true;
+
     static PyTypeObject Type;
-    void init() {}
 
-    py::object run(Arena& A, PyObject *const *args,
-                      Py_ssize_t nargs,
-                      PyObject *kwnames) {
-        // std::cout << "_wrapped " << orig << "\n";
-        py::vector_args va(args, nargs, kwnames);
-
-        auto _getarg = [&](const char* name, int64_t offset_) -> py::handle {
-            auto offset = offset_ + 1; // do not include self
-            auto idx = va.index(name, offset);
-            return idx == -1 ? py::handle() : va[idx];
-        };
-        Slice<py::handle> patched_args;
-        patched_args.extend(A, va.begin(), va.end());
-        auto _patcharg = [&](const char* name, int64_t offset_, py::handle value) {
-            auto offset = offset_ + 1; // do not include self
-            auto idx = va.index(name, offset);
-            if (idx == -1) {
-                py::raise_error(PyExc_ValueError, "Missing argument %s", name);
-            }
-            patched_args[idx] = value;
-        };
-
-        auto dim = _getarg(dim_name.c_str(), dim_offset);
-        if (!dim.ptr()) {
-            auto info = TensorInfo::create(A, args[0], true);
-            EnableAllLayers l(info.levels);
-            patched_args[0] = handle_from_tensor(A, info.batchedtensor);
-            auto r = orig.call_vector(patched_args.begin(), nargs, kwnames);
-            return Tensor::from_batched(A, THPVariable_Unpack(r.ptr()), info.has_device);
+    void init(py::object orig_, PyCFunction wrapper_implementation, std::string dim_name_="") {
+        orig = std::move(orig_);
+        method_def.ml_meth = wrapper_implementation;
+        name = orig.attr("__name__");
+        doc = orig.attr("__doc__");
+        dim_name = std::move(dim_name_);
+        if (!py::is_none(doc) && dim_name.size() > 0) {
+            doc = py::unicode_from_format("%S\nArgument '%s' can be either an integer or a torchdim.Dim object.\n", doc.ptr(), dim_name.c_str());
         }
+        method_def.ml_name = py::is_none(name) ? "" : PyUnicode_AsUTF8(name.ptr());
+        method_def.ml_doc = py::is_none(doc) ? "" : PyUnicode_AsUTF8(doc.ptr());
+        method_def.ml_flags = METH_FASTCALL | METH_KEYWORDS;
+    }
 
-        auto info = TensorInfo::create(A, args[0]);
-        auto keepdim = false;
-        if (reduce) {
-            auto py_keepdim = _getarg("keepdim",keepdim_offset);
-            if (py_keepdim.ptr()) {
-                keepdim = py::to_bool(py_keepdim);
-            }
-        }
-
-        auto ndim = info.ndim();
-        auto dims = _dims(A, dim, ndim, keepdim);
-        Slice<int64_t> dim_indices;
-        auto seen = A.allocate<bool>(info.levels.size());
-        std::fill(seen, seen + info.levels.size(), false);
-
-        for (auto d : dims) {
-            auto midx = info.levels.index(d);
-            if (!midx) {
-                auto tup = levels_to_tuple(info.levels);
-                py::raise_error(PyExc_ValueError, "Tensor with dimensions %R does not contain one of %R\n", tup.ptr(), dim.ptr());
-            }
-            seen[*midx] = true;
-            dim_indices.append(A, *midx);
-        }
-        Slice<DimEntry> new_levels;
-        if (reduce && !keepdim) {
-            for (auto i : info.levels.enumerate()) {
-                if (!seen[i]) {
-                    new_levels.append(A, info.levels[i]);
-                }
-            }
-        } else {
-            new_levels = info.levels;
-        }
-        py::object py_indices;
-        if (dim_indices.size() == 1) {
-            py_indices = py::from_int(dim_indices[0]);
-        } else {
-            py::tuple tup(dim_indices.size());
-            for (auto i : dim_indices.enumerate()) {
-                tup.set(i, py::from_int(dim_indices[i]));
-            }
-            py_indices = std::move(tup);
-        }
-        _patcharg(dim_name.c_str(), dim_offset, py_indices);
-        patched_args[0] = handle_from_tensor(A, info.tensor);
-        auto r = orig.call_vector(patched_args.begin(), nargs, kwnames);
-        auto wrap = [&](py::handle h) {
-            if (THPVariable_Check(h.ptr())) {
-                return A.autorelease(Tensor::from_positional(A, THPVariable_Unpack(h.ptr()), new_levels, info.has_device));
-            }
-            return h;
-        };
-        return tree_map(A, wrap, r);
+    py::object function() {
+        return py::object::checked_steal(PyCFunction_New(&method_def, ptr()));
     }
 
 };
@@ -2992,20 +2892,97 @@ PyTypeObject WrappedOperator::Type = {
     WrappedOperator::new_stub,                      /* tp_new */
 };
 
-static PyObject* py_wrapped_operator(PyObject * self_,
+static PyObject* patched_dim_method(PyObject * self_,
                       PyObject *const *args,
                       Py_ssize_t nargs,
                       PyObject *kwnames) {
     Arena A;
     auto self = WrappedOperator::unchecked_wrap(self_);
     PY_BEGIN
-    return self->run(A, args, nargs, kwnames).release();
+
+    py::vector_args va(args, nargs, kwnames);
+
+    auto _getarg = [&](const char* name, int64_t offset_) -> py::handle {
+        auto offset = offset_ + 1; // do not include self
+        auto idx = va.index(name, offset);
+        return idx == -1 ? py::handle() : va[idx];
+    };
+    Slice<py::handle> patched_args;
+    patched_args.extend(A, va.begin(), va.end());
+    auto _patcharg = [&](const char* name, int64_t offset_, py::handle value) {
+        auto offset = offset_ + 1; // do not include self
+        auto idx = va.index(name, offset);
+        if (idx == -1) {
+            py::raise_error(PyExc_ValueError, "Missing argument %s", name);
+        }
+        patched_args[idx] = value;
+    };
+
+    auto dim = _getarg(self->dim_name.c_str(), self->dim_offset);
+    if (!dim.ptr()) {
+        auto info = TensorInfo::create(A, args[0], true);
+        EnableAllLayers l(info.levels);
+        patched_args[0] = handle_from_tensor(A, info.batchedtensor);
+        auto r = self->orig.call_vector(patched_args.begin(), nargs, kwnames);
+        return Tensor::from_batched(A, THPVariable_Unpack(r.ptr()), info.has_device).release();
+    }
+
+    auto info = TensorInfo::create(A, args[0]);
+    auto keepdim = false;
+    if (self->reduce) {
+        auto py_keepdim = _getarg("keepdim", self->keepdim_offset);
+        if (py_keepdim.ptr()) {
+            keepdim = py::to_bool(py_keepdim);
+        }
+    }
+
+    auto ndim = info.ndim();
+    auto dims = _dims(A, dim, ndim, keepdim);
+    Slice<int64_t> dim_indices;
+    auto seen = A.allocate<bool>(info.levels.size());
+    std::fill(seen, seen + info.levels.size(), false);
+
+    for (auto d : dims) {
+        auto midx = info.levels.index(d);
+        if (!midx) {
+            auto tup = levels_to_tuple(info.levels);
+            py::raise_error(PyExc_ValueError, "Tensor with dimensions %R does not contain one of %R\n", tup.ptr(), dim.ptr());
+        }
+        seen[*midx] = true;
+        dim_indices.append(A, *midx);
+    }
+    Slice<DimEntry> new_levels;
+    if (self->reduce && !keepdim) {
+        for (auto i : info.levels.enumerate()) {
+            if (!seen[i]) {
+                new_levels.append(A, info.levels[i]);
+            }
+        }
+    } else {
+        new_levels = info.levels;
+    }
+    py::object py_indices;
+    if (dim_indices.size() == 1) {
+        py_indices = py::from_int(dim_indices[0]);
+    } else {
+        py::tuple tup(dim_indices.size());
+        for (auto i : dim_indices.enumerate()) {
+            tup.set(i, py::from_int(dim_indices[i]));
+        }
+        py_indices = std::move(tup);
+    }
+    _patcharg(self->dim_name.c_str(), self->dim_offset, py_indices);
+    patched_args[0] = handle_from_tensor(A, info.tensor);
+    auto r = self->orig.call_vector(patched_args.begin(), nargs, kwnames);
+    auto wrap = [&](py::handle h) {
+        if (THPVariable_Check(h.ptr())) {
+            return A.autorelease(Tensor::from_positional(A, THPVariable_Unpack(h.ptr()), new_levels, info.has_device));
+        }
+        return h;
+    };
+    return tree_map(A, wrap, r).release();
     PY_END(nullptr)
 }
-
-
-PyMethodDef py_wrapped_operator_def = {"wrapped", (PyCFunction) py_wrapped_operator, METH_FASTCALL | METH_KEYWORDS};
-
 
 static PyObject* _wrap(PyObject * self_,
                       PyObject *const *args,
@@ -3018,18 +2995,18 @@ static PyObject* _wrap(PyObject * self_,
                     _(py::handle, dim_name) _(py::handle, single_dim) _(py::handle, reduce)
     MPY_PARSE_ARGS_KWNAMES("O|OOOOO", ARGS)
 
-    auto info = WrappedOperator::create();
-    info->orig = py::object::borrow(orig);
+    std::string dim_name_str;
+    if (dim_name.ptr()) {
+        dim_name_str = PyUnicode_AsUTF8(dim_name.ptr());
+    } else {
+        dim_name_str = "dim";
+    }
+    auto info = WrappedOperator::create(py::object::borrow(orig), (PyCFunction) patched_dim_method, std::move(dim_name_str));
     if (dim_offset.ptr()) {
         info->dim_offset = py::to_int(dim_offset);
     }
     if (keepdim_offset.ptr()) {
         info->keepdim_offset = py::to_int(keepdim_offset);
-    }
-    if (dim_name.ptr()) {
-        info->dim_name = PyUnicode_AsUTF8(dim_name.ptr());
-    } else {
-        info->dim_name = "dim";
     }
 
     if (single_dim.ptr()) {
@@ -3038,12 +3015,42 @@ static PyObject* _wrap(PyObject * self_,
     if (reduce.ptr()) {
         info->reduce = py::to_bool(reduce);
     }
-    return py::object::checked_steal(PyCFunction_New(&py_wrapped_operator_def, info.release())).release();
-
+    return info->function().release();
     #undef ARGS
 
     PY_END(nullptr)
 }
+
+static PyObject* call_torch_function(PyObject *self,
+                      PyObject *const *args,
+                      Py_ssize_t nargs,
+                      PyObject *kwnames) {
+    PY_BEGIN
+    Arena A;
+    maybeInitializeGlobals();
+    auto info = WrappedOperator::unchecked_wrap(self);
+    return __torch_function__(A, info->orig, py::vector_args(args, nargs, kwnames), info->is_pointwise).release();
+    PY_END(nullptr)
+}
+
+static PyObject* _wrap_method(PyObject *self,
+                      PyObject *const *args,
+                      Py_ssize_t nargs,
+                      PyObject *kwnames) {
+    PY_BEGIN
+    AT_ASSERT(nargs == 2);
+    // XXX - ignore python function wrapped, we will call torch function directly
+    py::handle orig = args[0];
+    if (!pointwise.ptr()) {
+        auto dim = py::import("torchdim");
+        pointwise = dim.attr("pointwise");
+    }
+    auto info = WrappedOperator::create(py::object::borrow(orig), (PyCFunction) call_torch_function);
+    info->is_pointwise = pointwise.contains(orig);
+    return PyInstanceMethod_New(info->function().release());
+    PY_END(nullptr);
+}
+
 
 static PyObject* Tensor_sum(PyObject * self_,
                       PyObject *const *args,

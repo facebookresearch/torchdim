@@ -23,7 +23,7 @@ from time import perf_counter
 
 measure_perf = False
 if measure_perf:
-    from dim.magic_trace import magic_trace
+    from torchdim.magic_trace import magic_trace
 else:
     @contextmanager
     def magic_trace(*args, **kwargs):
@@ -526,6 +526,9 @@ class TestMin(TestCase):
     def test_dir(self):
         i,j = dims(sizes=[3, 3])
         dir(i <= j)
+
+    def test_doc(self):
+        assert Tensor.clamp.__doc__ == torch.Tensor.clamp.__doc__
 
 
 
