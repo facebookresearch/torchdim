@@ -530,6 +530,22 @@ class TestMin(TestCase):
     def test_doc(self):
         assert Tensor.clamp.__doc__ == torch.Tensor.clamp.__doc__
 
+    def test_embed(self):
+
+        embeddings = torch.rand(8, 32)
+        ids = torch.tensor([1, 0, 3, 4])
+
+        # slow but Pythonic
+        values_ = torch.empty(4, 32)
+        for batch in range(ids.size(0)):
+            for feature in range(embeddings.size(1)):
+                values_[batch, feature] = embeddings[ids[batch], feature]
+
+        # with torchdim, single indexing kernel
+        batch, feature = dims(2)
+        values = embeddings[ids[batch], feature].order(batch, feature)
+
+        assert torch.allclose(values, values_)
 
 
 if __name__ == '__main__':
