@@ -12,7 +12,6 @@ from attn_positional import BertSelfAttention as BertSelfAttentionB
 from unittest import TestCase, main
 import torch
 import gc
-import refcycle
 from torchvision.models import resnet18
 
 
@@ -90,6 +89,7 @@ class TestMin(TestCase):
 
         nolevels = _n_levels_in_use() == 0
         if not nolevels or extra_memory != 0 or len(interesting) != 0:
+            import refcycle
             refcycle.garbage().export_image('garbage.pdf')
         gc.collect()
         assert nolevels, f"cleanup failed? {_n_levels_in_use()}"
