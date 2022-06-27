@@ -39,8 +39,12 @@ A preview:
 Installation
 ============
 
+
+_torchdim is a preview release so that we can collect feedback on the API. It may have bugs, and there are known places where performance can be improved._
+
 First-class dims are a library that extends PyTorch, so they need to be installed separately.
 We may eventually upstream them into PyTorch itself along with `functorch`.
+
 
 We have to install a nightly build of PyTorch so first set up an environment:
 
