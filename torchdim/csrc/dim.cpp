@@ -805,36 +805,34 @@ struct TensorInfo {
         }
     }
 
-    static TensorInfo create(Arena& A, TensorRef batchedtensor, bool has_device) {
-        Slice<DimEntry> levels;
-        for (auto i : irange(-batchedtensor->dim(), 0)) {
-            levels.append(A, i);
-        }
-        TensorRef tensor;
-        at::functorch::BatchedTensorImpl * impl = maybeGetBatchedImpl(*batchedtensor);
-        while(true) {
-            auto level = impl->level() - LEVEL_OFFSET;
-            py::hdl<Dim> dim = (Dim*) levels_in_use[level].ptr();
-            levels.insert(A, impl->bdim(), dim);
-            at::functorch::BatchedTensorImpl * nimpl = maybeGetBatchedImpl(impl->value());
-            if (!nimpl) {
-                tensor = impl->value();
-                break;
-            }
-            impl = nimpl;
-        }
-        return TensorInfo {tensor, levels, has_device, batchedtensor};
-    }
+
 };
 
-py::obj<Tensor> Tensor::from_batched(Arena& A, at::Tensor batched, bool has_device) {
-    TensorInfo info = TensorInfo::create(A, batched, has_device != 0);
+py::obj<Tensor> Tensor::from_batched(Arena& A, at::Tensor batchedtensor, bool has_device) {
+    Slice<DimEntry> levels;
+    for (auto i : irange(-batchedtensor.dim(), 0)) {
+        levels.append(A, i);
+    }
+    TensorRef tensor;
+    at::functorch::BatchedTensorImpl * impl = maybeGetBatchedImpl(batchedtensor);
+    while(true) {
+        auto level = impl->level() - LEVEL_OFFSET;
+        py::hdl<Dim> dim = (Dim*) levels_in_use[level].ptr();
+        levels.insert(A, impl->bdim(), dim);
+        at::functorch::BatchedTensorImpl * nimpl = maybeGetBatchedImpl(impl->value());
+        if (!nimpl) {
+            tensor = impl->value();
+            break;
+        }
+        impl = nimpl;
+    }
+
     py::obj<Tensor> self = Tensor::create();
     // grab ownership of the tensors
-    self->tensor_ = *info.tensor;
-    self->batchtensor_ = std::move(batched);
-    self->has_device_ = info.has_device;
-    self->capture_levels(info.levels);
+    self->tensor_ = *tensor;
+    self->batchtensor_ = std::move(batchedtensor);
+    self->has_device_ = has_device;
+    self->capture_levels(levels);
     return self;
 }
 
@@ -1171,6 +1169,7 @@ struct EnableAllLayers {
         N = layers.size();
         at::functorch::_vmap_add_layers(layers);
     }
+
     ~EnableAllLayers() {
         at::functorch::_vmap_remove_layers(N);
     }
