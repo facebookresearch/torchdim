@@ -124,6 +124,9 @@ struct Dim : public py::base<Dim> {
     py::object name_;
     Dim()
     : level_(n_levels_in_use++) {
+        if (level_ >= MAX_LEVELS_IN_USE) {
+            py::raise_error(PyExc_ValueError, "Current implementaion is limited to 32 live Dim objects at once.");
+        }
         // weakref, cleared when this is destructed
         levels_in_use[level_] = ptr();
     }
