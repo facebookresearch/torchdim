@@ -1,7 +1,7 @@
 Named Tensors using First-class Dimensions in PyTorch
 =====================================================
 
--- Zach DeVito [@zachdevito](https://twitter.com/zachdevito)
+-- Zachary DeVito [@Zachary_DeVito](https://twitter.com/Zachary_DeVito)
 
 _An implementation of [named tensors](https://namedtensor.github.io) with the functionality of [einsum](http://einops.rocks]http://einops.rocks) , batching ([vmap](https://jax.readthedocs.io/en/latest/jax.html#vectorization-vmap), [xmap](https://jax.readthedocs.io/en/latest/notebooks/xmap_tutorial.html)), and tensor indexing by adding dimension objects to PyTorch_.
 
