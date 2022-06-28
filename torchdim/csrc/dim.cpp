@@ -32,8 +32,8 @@
 namespace at {
 namespace functorch {
     at::Tensor _add_batch_dim(const at::Tensor& self, int64_t batch_dim, int64_t level);
-    void _vmap_add_layers(const std::vector<std::pair<int64_t, int64_t>>& levels);
-    void _vmap_remove_layers(int N);
+    int64_t _vmap_increment_nesting(int64_t batch_size, const std::string& randomness);
+    int64_t _vmap_decrement_nesting();
 }
 }
 
@@ -113,30 +113,14 @@ static py::handle DimensionBindError() {
     return DimensionBindError_;
 }
 
-constexpr int MAX_LEVELS_IN_USE = 32;
-static int n_levels_in_use = 0;
-static py::handle levels_in_use[MAX_LEVELS_IN_USE];
-constexpr int LEVEL_OFFSET = 31;
+static int64_t n_dims_created = 65;
 
 PyTypeObject* DimType = nullptr;
 struct Dim : public py::base<Dim> {
-    int level_; // for stable comparisons in prototype
+    int64_t level_; // for stable comparisons in prototype
     py::object name_;
     Dim()
-    : level_(n_levels_in_use++) {
-        if (level_ >= MAX_LEVELS_IN_USE) {
-            py::raise_error(PyExc_ValueError, "Current implementaion is limited to 32 live Dim objects at once.");
-        }
-        // weakref, cleared when this is destructed
-        levels_in_use[level_] = ptr();
-    }
-    ~Dim() {
-        AT_ASSERT(levels_in_use[level_].ptr() == ptr());
-        levels_in_use[level_] = nullptr;
-        while(n_levels_in_use > 0 && levels_in_use[n_levels_in_use - 1].ptr() == nullptr) {
-            --n_levels_in_use;
-        }
-    }
+    : level_(n_dims_created++) {}
     void init(py::object name, int64_t s = -1) {
         name_ = std::move(name);
         size_ = s;
@@ -179,7 +163,7 @@ struct Dim : public py::base<Dim> {
     }
     const at::Tensor& batchtensor() {
         if (!batchtensor_.defined()) {
-            batchtensor_ = at::functorch::_add_batch_dim(range(), 0, level_ + LEVEL_OFFSET);
+            batchtensor_ = at::functorch::_add_batch_dim(range(), 0, level_);
         }
         return batchtensor_;
     }
@@ -278,7 +262,7 @@ static PyObject* Dim_getis_bound(Dim* self, void*) {
 }
 
 static PyObject* Dim_getlevel(Dim* self, void*) {
-    return PyLong_FromLong(LEVEL_OFFSET + self->level_);
+    return PyLong_FromLong(self->level_);
 }
 
 static PyObject* Dim_get_levels(Dim* self, void*) {
@@ -706,20 +690,20 @@ public:
         }
         levels_.set(levels, free_levels_dims);
     }
-    static py::obj<Tensor> from_batched(Arena& A, at::Tensor batched, bool has_device);
     static py::object from_positional(Arena & A, at::Tensor tensor, Slice<DimEntry> levels, bool has_device);
     static py::obj<Tensor> create_delayed(py::object op, py::vector_args args, Slice<DimEntry> levels, bool has_device);
+    friend struct EnableAllLayers;
 };
 
 at::Tensor _add_batch_dims(Arena& A, at::Tensor t, Slice<DimEntry> levels_) {
     auto levels = Slice<DimEntry>();
     levels.extend(A, levels_);
     while (true) {
-        int min_real_index = -1;
-        int min_index = -1;
-        int min_value = INT_MAX;
-        int i = 0;
-        int r = 0;
+        int64_t min_real_index = -1;
+        int64_t min_index = -1;
+        int64_t min_value = INT_MAX;
+        int64_t i = 0;
+        int64_t r = 0;
         for (auto l : levels) {
             if (!l.is_none()) {
                 if (!l.is_positional() && l.dim()->level_ < min_value) {
@@ -734,7 +718,7 @@ at::Tensor _add_batch_dims(Arena& A, at::Tensor t, Slice<DimEntry> levels_) {
         if (min_index == -1) {
             return t;
         }
-        auto t2 = at::functorch::_add_batch_dim(std::move(t), min_index, min_value + LEVEL_OFFSET);
+        auto t2 = at::functorch::_add_batch_dim(std::move(t), min_index, min_value);
         t = std::move(t2);
         levels[min_real_index] = DimEntry();
     }
@@ -807,53 +791,6 @@ struct TensorInfo {
 
 
 };
-
-py::obj<Tensor> Tensor::from_batched(Arena& A, at::Tensor batchedtensor, bool has_device) {
-    Slice<DimEntry> levels;
-    for (auto i : irange(-batchedtensor.dim(), 0)) {
-        levels.append(A, i);
-    }
-    TensorRef tensor;
-    at::functorch::BatchedTensorImpl * impl = maybeGetBatchedImpl(batchedtensor);
-    while(true) {
-        auto level = impl->level() - LEVEL_OFFSET;
-        py::hdl<Dim> dim = (Dim*) levels_in_use[level].ptr();
-        levels.insert(A, impl->bdim(), dim);
-        at::functorch::BatchedTensorImpl * nimpl = maybeGetBatchedImpl(impl->value());
-        if (!nimpl) {
-            tensor = impl->value();
-            break;
-        }
-        impl = nimpl;
-    }
-
-    py::obj<Tensor> self = Tensor::create();
-    // grab ownership of the tensors
-    self->tensor_ = *tensor;
-    self->batchtensor_ = std::move(batchedtensor);
-    self->has_device_ = has_device;
-    self->capture_levels(levels);
-    return self;
-}
-
-static PyObject* py_Tensor_from_batched(PyObject *self,
-                      PyObject *const *args,
-                      Py_ssize_t nargs,
-                      PyObject *kwnames) {
-    Arena A;
-    PY_BEGIN
-    #define ARGS(_) _(py::handle, py_batchedtensor) _(int, has_device)
-    MPY_PARSE_ARGS_KWNAMES("Op", ARGS)
-    #undef ARGS
-
-    if (!THPVariable_Check(py_batchedtensor.ptr())) {
-        py::raise_error(PyExc_ValueError, "_batchedtensor is not a Tensor?");
-    }
-    auto self = Tensor::from_batched(A, THPVariable_Unpack(py_batchedtensor.ptr()),  has_device != 0);
-    return self.release();
-
-    PY_END(nullptr)
-}
 
 py::object Tensor::from_positional(Arena & A, at::Tensor tensor, Slice<DimEntry> levels, bool has_device) {
     size_t seen_dims = 0;
@@ -1156,25 +1093,77 @@ inline py::handle handle_from_tensor(Arena& A, TensorRef t) {
 }
 
 struct EnableAllLayers {
-    EnableAllLayers(Slice<DimEntry> levels) {
+    EnableAllLayers(Arena& A, Slice<DimEntry> levels) {
         std::vector<std::pair<int64_t, int64_t>> layers;
         layers.reserve(levels.size());
         for (auto l : levels) {
             if (!l.is_positional()) {
                 auto d = l.dim();
-                layers.emplace_back(d->level_ + LEVEL_OFFSET, d->size());
+                levels_to_dim_.append(A, d);
             }
         }
-        std::sort(layers.begin(), layers.end());
-        N = layers.size();
-        at::functorch::_vmap_add_layers(layers);
+        std::sort(levels_to_dim_.begin(), levels_to_dim_.end(), [](py::hdl<Dim> lhs, py::hdl<Dim> rhs) { return lhs->level_ < rhs->level_;});
+
+        for (auto i : levels_to_dim_.enumerate()) {
+            auto level = at::functorch::_vmap_increment_nesting(levels_to_dim_[i]->size(), "different");
+            if (i == 0) {
+                levels_start_ = level;
+            }
+        }
     }
 
     ~EnableAllLayers() {
-        at::functorch::_vmap_remove_layers(N);
+        auto to_remove = levels_start_ + levels_to_dim_.size() - 1;
+        for (auto i : levels_to_dim_.enumerate()) {
+            AT_ASSERT(at::functorch::_vmap_decrement_nesting() == to_remove - i);
+        }
+    }
+
+    py::obj<Tensor> from_batched(Arena& A, at::Tensor batchedtensor, bool has_device) {
+        Slice<DimEntry> levels;
+        for (auto i : irange(-batchedtensor.dim(), 0)) {
+            levels.append(A, i);
+        }
+        TensorRef tensor;
+        at::functorch::BatchedTensorImpl * impl = maybeGetBatchedImpl(batchedtensor);
+        while(true) {
+            auto level = impl->level();
+            AT_ASSERT(level >= levels_start_ && level < levels_start_ + levels_to_dim_.size());
+            py::hdl<Dim> dim = levels_to_dim_[level - levels_start_].ptr();
+            levels.insert(A, impl->bdim(), dim);
+            at::functorch::BatchedTensorImpl * nimpl = maybeGetBatchedImpl(impl->value());
+            if (!nimpl) {
+                tensor = impl->value();
+                break;
+            }
+            impl = nimpl;
+        }
+
+        py::obj<Tensor> self = Tensor::create();
+        // grab ownership of the tensors
+        self->tensor_ = *tensor;
+        self->batchtensor_ = std::move(batchedtensor);
+        self->has_device_ = has_device;
+        self->capture_levels(levels);
+        return self;
+    }
+    void inplace_update_layers(TensorRef batchtensor, Slice<DimEntry> levels) {
+        // XXX - requires a patch to functorch to att set_level
+        auto impl = maybeGetBatchedImpl(*batchtensor);
+        for (auto i : levels_to_dim_.reversed_enumerate()) {
+            if (!impl) {
+                break;
+            }
+            if (levels.contains(levels_to_dim_[i])) {
+                impl->set_level(levels_start_ + i);
+                impl = maybeGetBatchedImpl(impl->value());
+
+            }
+        }
     }
 private:
-    int64_t N;
+    int64_t levels_start_;
+    Slice<py::hdl<Dim>> levels_to_dim_;
 };
 
 TensorRef _match_levels(Arena& A, TensorRef v, Slice<DimEntry> from_levels, Slice<DimEntry> to_levels, bool drop_levels=false) {
@@ -1258,13 +1247,14 @@ static py::object run_torch_function(Arena &A, py::handle orig, py::vector_args 
     } else {
         // std::cout << orig << " calling functorch...\n";
         // std::cout << "rl: " << result_levels << "\n";
-        EnableAllLayers guard(result_levels);
+        EnableAllLayers guard(A, result_levels);
         for (auto i : flat_args.enumerate()) {
             if (infos[i]) {
                 TensorRef batched = infos[i].batchedtensor;
                 if (device_holding_tensor && !infos[i].has_device) {
                     batched = A.autorelease(batched->to(device_holding_tensor->device()));
                 }
+                guard.inplace_update_layers(batched, infos[i].levels);
                 flat_args[i] = handle_from_tensor(A, batched);
             }
         }
@@ -1274,12 +1264,12 @@ static py::object run_torch_function(Arena &A, py::handle orig, py::vector_args 
         py::object result = orig.call_vector(uargs);
         auto wrap = [&](py::handle h) {
             if (THPVariable_Check(h.ptr())) {
-                return A.autorelease(Tensor::from_batched(A, THPVariable_Unpack(h.ptr()), device_holding_tensor));
+                return A.autorelease(guard.from_batched(A, THPVariable_Unpack(h.ptr()), device_holding_tensor));
             }
             return h;
         };
         if (THPVariable_Check(result.ptr())) {
-            return Tensor::from_batched(A, THPVariable_Unpack(result.ptr()), device_holding_tensor);
+            return guard.from_batched(A, THPVariable_Unpack(result.ptr()), device_holding_tensor);
         }
         return tree_map(A, wrap, result);
     }
@@ -2923,10 +2913,11 @@ static PyObject* patched_dim_method(PyObject * self_,
     auto dim = _getarg(self->dim_name.c_str(), self->dim_offset);
     if (!dim.ptr()) {
         auto info = TensorInfo::create(A, args[0], true);
-        EnableAllLayers l(info.levels);
+        EnableAllLayers l(A, info.levels);
+        l.inplace_update_layers(info.batchedtensor, info.levels);
         patched_args[0] = handle_from_tensor(A, info.batchedtensor);
         auto r = self->orig.call_vector(patched_args.begin(), nargs, kwnames);
-        return Tensor::from_batched(A, THPVariable_Unpack(r.ptr()), info.has_device).release();
+        return l.from_batched(A, THPVariable_Unpack(r.ptr()), info.has_device).release();
     }
 
     auto info = TensorInfo::create(A, args[0]);
@@ -3128,9 +3119,7 @@ static PyMethodDef methods[] = {
     {"dimlists", (PyCFunction) _dims<create_dimlist>, METH_FASTCALL | METH_KEYWORDS},
     {"_test_c", (PyCFunction) test_c, METH_FASTCALL | METH_KEYWORDS},
     {"_wrap_method", (PyCFunction) _wrap_method, METH_FASTCALL | METH_KEYWORDS},
-    {"_n_levels_in_use", [](PyObject*,PyObject*) -> PyObject* { return PyLong_FromLongLong(n_levels_in_use); }, METH_NOARGS},
     {"Tensor_from_positional", (PyCFunction) py_Tensor_from_positional, METH_FASTCALL | METH_KEYWORDS},
-    {"Tensor_from_batched", (PyCFunction) py_Tensor_from_batched, METH_FASTCALL | METH_KEYWORDS},
     {"__torch_function__", (PyCFunction) py___torch_function__, METH_FASTCALL | METH_KEYWORDS},
     {"tree_flatten", (PyCFunction) py_tree_flatten, METH_FASTCALL | METH_KEYWORDS},
     {"order", (PyCFunction) order, METH_FASTCALL | METH_KEYWORDS},

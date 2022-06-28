@@ -58,7 +58,8 @@ class Dim(_C.Dim, _Tensor):
 
 
 class Tensor(_Tensor, _C.Tensor):
-    from_batched = staticmethod(_C.Tensor_from_batched)
+    if not use_c:
+        from_batched = staticmethod(_C.Tensor_from_batched)
     from_positional = staticmethod(_C.Tensor_from_positional)
     sum = _C._instancemethod(_C.Tensor_sum)
 
