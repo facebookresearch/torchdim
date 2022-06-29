@@ -14,6 +14,7 @@
 //#include <torch/csrc/autograd/python_variable.h>
 #include <torch/csrc/Export.h>
 #include <functorch/csrc/BatchedTensorImpl.h>
+#include <functorch/csrc/DynamicLayer.h>
 #include <ATen/ATen.h>
 #include <memory>
 #include "arena.h"
@@ -29,14 +30,6 @@
 // * object/handle distinction for the typed handles
 
 // class Dim: ---------------
-namespace at {
-namespace functorch {
-    at::Tensor _add_batch_dim(const at::Tensor& self, int64_t batch_dim, int64_t level);
-    int64_t _vmap_increment_nesting(int64_t batch_size, const std::string& randomness);
-    int64_t _vmap_decrement_nesting();
-}
-}
-
 py::handle empty_dict;
 py::handle torch_Tensor___mul__;
 py::handle _Tensor;
@@ -163,7 +156,7 @@ struct Dim : public py::base<Dim> {
     }
     const at::Tensor& batchtensor() {
         if (!batchtensor_.defined()) {
-            batchtensor_ = at::functorch::_add_batch_dim(range(), 0, level_);
+            batchtensor_ = at::functorch::addBatchDim(range(), 0, level_);
         }
         return batchtensor_;
     }
@@ -718,7 +711,7 @@ at::Tensor _add_batch_dims(Arena& A, at::Tensor t, Slice<DimEntry> levels_) {
         if (min_index == -1) {
             return t;
         }
-        auto t2 = at::functorch::_add_batch_dim(std::move(t), min_index, min_value);
+        auto t2 = at::functorch::addBatchDim(std::move(t), min_index, min_value);
         t = std::move(t2);
         levels[min_real_index] = DimEntry();
     }
@@ -1105,7 +1098,8 @@ struct EnableAllLayers {
         std::sort(levels_to_dim_.begin(), levels_to_dim_.end(), [](py::hdl<Dim> lhs, py::hdl<Dim> rhs) { return lhs->level_ < rhs->level_;});
 
         for (auto i : levels_to_dim_.enumerate()) {
-            auto level = at::functorch::_vmap_increment_nesting(levels_to_dim_[i]->size(), "different");
+            auto batch_size = levels_to_dim_[i]->size();
+            auto level = at::functorch::initAndPushDynamicLayer(at::functorch::TransformType::Vmap, batch_size, at::functorch::RandomnessType::Different);
             if (i == 0) {
                 levels_start_ = level;
             }
@@ -1115,7 +1109,7 @@ struct EnableAllLayers {
     ~EnableAllLayers() {
         auto to_remove = levels_start_ + levels_to_dim_.size() - 1;
         for (auto i : levels_to_dim_.enumerate()) {
-            AT_ASSERT(at::functorch::_vmap_decrement_nesting() == to_remove - i);
+            AT_ASSERT(at::functorch::popDynamicLayerAndDeleteMetadata().layerId() == to_remove - i);
         }
     }
 
@@ -1155,7 +1149,7 @@ struct EnableAllLayers {
                 break;
             }
             if (levels.contains(levels_to_dim_[i])) {
-                impl->set_level(levels_start_ + i);
+                impl->_unsafe_set_level(levels_start_ + i);
                 impl = maybeGetBatchedImpl(impl->value());
 
             }

@@ -24,16 +24,12 @@ extra_libraries=[]
 
 if build_functorch:
     cwd = 'third_party/functorch'
-    if '#if 0' not in open('third_party/functorch/functorch/csrc/init.cpp', 'r').read():
-        print("PATCHING FUNCTORCH")
-        run(['git', 'apply', '../../functorch.diff'], cwd=cwd)
-
     this_dir = os.path.dirname(os.path.abspath(__file__))
     ft_home = os.path.join(this_dir, "third_party", "functorch")
     extensions_dir = os.path.join(ft_home, "functorch", "csrc")
     extension_sources = set(
         os.path.join(extensions_dir, p)
-        for p in glob.glob(os.path.join(extensions_dir, "*.cpp"))
+        for p in glob.glob(os.path.join(extensions_dir, "*.cpp")) if 'init.cpp' not in p
     )
     srcs.extend(extension_sources)
 else:
@@ -41,7 +37,7 @@ else:
     ft_home = os.path.dirname(os.path.dirname(os.path.abspath(functorch.__file__)))
     extra_libraries.append(functorch._C.__file__)
 
-mintorch_C = CppExtension(
+torchdim_C = CppExtension(
       'torchdim._C',
       srcs,
       include_dirs = [os.path.dirname(os.path.abspath(__file__)), ft_home],
@@ -56,7 +52,7 @@ setup(name='torchdim',
       author_email='',
       url='',
       packages=['torchdim'],
-      ext_modules=[mintorch_C],
+      ext_modules=[torchdim_C],
       cmdclass={"build_ext": BuildExtension.with_options(no_python_abi_suffix=True)}
      )
 
