@@ -461,7 +461,8 @@ Equivalent with dimension objects:
 
 ```py
 batch, inputs, hidden, classes = dims(4)
-print(loss(w1[inputs, hidden], w2[hidden, classes], images[batch, inputs], labels[batch]))
+print(loss(w1[inputs, hidden], w2[hidden, classes], images[batch, inputs], labels[batch],
+      batch, inputs, hidden, classes))
 ```
 
 
