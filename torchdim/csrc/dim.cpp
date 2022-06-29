@@ -50,7 +50,7 @@ py::handle no_slice;
 PyTypeObject* torch_Tensor;
 py::handle torch_Tensor_copy_;
 py::handle torch_Tensor_split;
-
+bool pointwise_optimize = true;
 
 static void maybeInitializeGlobals() {
     // globals that depend on the python dim library,
@@ -1191,6 +1191,9 @@ TensorRef _match_levels(Arena& A, TensorRef v, Slice<DimEntry> from_levels, Slic
 }
 
 static py::object run_torch_function(Arena &A, py::handle orig, py::vector_args args, bool is_pointwise) {
+    if (!pointwise_optimize) {
+        is_pointwise = false;
+    }
     // std::cout << "__torch_function__ " << ((is_pointwise) ? "pointwise" : "functorch") << " " << orig << "\n";
 
     Slice<py::hdl<Dim>> all_dims;
@@ -3099,6 +3102,20 @@ static PyObject* _parse_test(PyObject * self_,
     PY_END(nullptr)
 }
 
+static PyObject* _set_pointwise_optimize(PyObject * self_,
+                      PyObject *const *args,
+                      Py_ssize_t nargs,
+                      PyObject *kwnames) {
+    PY_BEGIN
+    py::handle value;
+    py::vector_args va(args, nargs, kwnames);
+    va.parse("_set_pointwise_optimization", {"value"}, {&value}, 1);
+    pointwise_optimize = py::to_bool(value);
+    Py_RETURN_NONE;
+    PY_END(nullptr)
+}
+
+
 const char* dims_doc = R"""(
 dims(n=None, sizes=None) -> torchdim.Dim or Tuple[torchdim.Dim, ...]
 
@@ -3132,6 +3149,7 @@ static PyMethodDef methods[] = {
     {"_wrap", (PyCFunction) _wrap, METH_FASTCALL | METH_KEYWORDS},
     {"Tensor_sum", (PyCFunction) Tensor_sum, METH_FASTCALL | METH_KEYWORDS},
     {"_parse_test", (PyCFunction) _parse_test, METH_FASTCALL | METH_KEYWORDS},
+    {"_set_pointwise_optimize", (PyCFunction) _set_pointwise_optimize, METH_FASTCALL | METH_KEYWORDS},
     {NULL, NULL, 0, NULL}        /* Sentinel */
 };
 

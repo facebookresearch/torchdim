@@ -9,13 +9,13 @@ from torchdim import Tensor, Dim, dims, dimlists, stack, DimensionBindError, cat
 from attn_ft import BertSelfAttention as BertSelfAttentionA, Linear
 from attn_positional import BertSelfAttention as BertSelfAttentionB
 
-from unittest import TestCase, main
+from unittest import TestCase, main, skip
 import torch
 import gc
 from torchvision.models import resnet18
 
 
-from torchdim._C import _test_c, _parse_test
+from torchdim._C import _test_c, _parse_test, _set_pointwise_optimize
 
 from contextlib import contextmanager
 from time import perf_counter
@@ -557,6 +557,20 @@ class TestMin(TestCase):
         AA = torch.mm(A[i], C) # 3, 4, 2
         BB = torch.mm(B[j], C) # 3, 4, 2
         assert list(torch.mm(AA.T, BB).order(i, j).shape) == [3, 3, 2, 2]
+
+
+skip_functorch_only = ['test_time_mm_fuse', 'test_attn_cuda']
+class TestMinFunctorchOnly(TestMin):
+    def setUp(self):
+        super().setUp()
+        _set_pointwise_optimize(False)
+
+    def tearDown(self):
+        _set_pointwise_optimize(True)
+        super().tearDown()
+
+for n in skip_functorch_only:
+    setattr(TestMinFunctorchOnly, n, skip("skip_functorch_only")(lambda self: None))
 
 
 if __name__ == '__main__':
