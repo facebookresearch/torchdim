@@ -44,6 +44,7 @@ PyTypeObject* torch_Tensor;
 py::handle torch_Tensor_copy_;
 py::handle torch_Tensor_split;
 bool pointwise_optimize = true;
+PyTypeObject* DimType = nullptr;
 
 static void maybeInitializeGlobals() {
     // globals that depend on the python dim library,
@@ -55,6 +56,7 @@ static void maybeInitializeGlobals() {
     _Tensor = dim.attr("_Tensor");
     pointwise = dim.attr("pointwise");
     _Tensor_sum = _Tensor.attr("sum");
+    DimType = (PyTypeObject*) py::import("torchdim").attr("Dim").ptr();
 }
 
 PyObject* Tensor_getitem(PyObject* self, PyObject* index);
@@ -108,7 +110,6 @@ static py::handle DimensionBindError() {
 
 static int64_t n_dims_created = 65;
 
-PyTypeObject* DimType = nullptr;
 struct Dim : public py::base<Dim> {
     int64_t level_; // for stable comparisons in prototype
     py::object name_;
@@ -141,7 +142,7 @@ struct Dim : public py::base<Dim> {
     }
     static py::obj<Dim> create(py::object name, int64_t s = -1) {
         if (!DimType) {
-            DimType = (PyTypeObject*) py::import("torchdim").attr("Dim").ptr();
+            maybeInitializeGlobals();
         }
         auto r = Dim::alloc(DimType);
         r->init(std::move(name), s);
@@ -555,6 +556,7 @@ PyTypeObject DimList::Type = {
 };
 
 static int DimList_init(DimList *self, PyObject *args, PyObject *kwds) {
+    PY_BEGIN
     static char* kwlist[] = {"len_or_dims", "name", nullptr};
     py::handle len_or_dims = nullptr;
     PyObject* name = nullptr;
@@ -586,6 +588,7 @@ static int DimList_init(DimList *self, PyObject *args, PyObject *kwds) {
         return 0;
     }
     return 0;
+    PY_END(-1);
 }
 
 // Tensor -----------------------------
