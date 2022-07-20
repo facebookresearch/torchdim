@@ -1781,7 +1781,7 @@ static PyObject* order(PyObject *_,
             if (d.is_positional()) {
                 py::raise_error(PyExc_ValueError, "tensor has %d positional dimensions, but %d specified, or it was specified twice", int(orig_ndim), int(d.position() + orig_ndim));
             } else {
-                py::raise_error(PyExc_ValueError, "tensor of dimensions %R does not contain dim %R or it was specified twice", levels_to_tuple(levels).ptr(), d.dim().ptr());
+                py::raise_error(PyExc_ValueError, "tensor of dimensions %R does not contain dim %R or it was specified twice", levels_to_tuple(orig_levels).ptr(), d.dim().ptr());
             }
         }
         levels[*midx] = DimEntry();
