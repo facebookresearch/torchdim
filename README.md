@@ -46,7 +46,7 @@ Update 2023
 
 This package is still maintained, but the code has been upstreamed into `functorch.dim` in the PyTorch repository.
 
-On modern versions of PyTorch it can imported with `from functorch.dim import dims`.
+On modern versions of PyTorch, it can be imported with `from functorch.dim import dims`.
 
 Direct Installation from this Repository (Outdated)
 ---------------
