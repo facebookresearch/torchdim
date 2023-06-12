@@ -41,6 +41,15 @@ def embedding_bag(input: torch.Tensor, embedding_weights: torch.Tensor):
 Installation
 ============
 
+Update 2023
+---------------
+
+This package is still maintained, but the code has been upstreamed into `functorch.dim` in the PyTorch repository.
+
+On modern versions of PyTorch it can imported with `from functorch.dim import dims`.
+
+Direct Installation from this Repository (Outdated)
+---------------
 
 _torchdim is a preview release so that we can collect feedback on the API. It may have bugs, and there are known places where performance can be improved._
 
